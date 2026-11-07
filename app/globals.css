@@ -363,6 +363,125 @@ footer { padding: var(--space-7) 0 var(--space-6); text-align: center; }
 .footer-base { font-size: 0.85rem; color: var(--color-faint); }
 .footer-base a { color: var(--color-accent); }
 
+/* ——— Crystal Ball overlay ——— */
+.veil {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: oklch(8% 0.012 260 / 0.6);
+  backdrop-filter: blur(22px);
+  -webkit-backdrop-filter: blur(22px);
+  display: grid;
+  place-items: center;
+  padding: var(--space-5);
+  overflow-y: auto;
+}
+.ball-stage {
+  text-align: center;
+  max-width: 560px;
+  width: 100%;
+}
+.ball {
+  position: relative;
+  width: 220px;
+  height: 220px;
+  margin: 0 auto var(--space-5);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 32% 28%, oklch(96% 0.02 80 / 0.95), oklch(80% 0.14 78 / 0.75) 22%, oklch(45% 0.1 70 / 0.55) 55%, oklch(20% 0.05 260 / 0.9) 100%);
+  box-shadow:
+    inset -18px -22px 60px oklch(15% 0.04 270 / 0.85),
+    inset 12px 14px 40px oklch(100% 0 0 / 0.3),
+    0 0 80px oklch(80% 0.14 78 / 0.45),
+    0 0 160px oklch(80% 0.14 78 / 0.2);
+  transition: box-shadow 0.4s ease;
+}
+.ball.listening { box-shadow: inset -18px -22px 60px oklch(15% 0.04 270 / 0.85), inset 12px 14px 40px oklch(100% 0 0 / 0.3), 0 0 130px oklch(80% 0.14 78 / 0.75), 0 0 220px oklch(80% 0.14 78 / 0.4); }
+.ball.thinking { box-shadow: inset -18px -22px 60px oklch(15% 0.04 270 / 0.85), inset 12px 14px 40px oklch(100% 0 0 / 0.3), 0 0 90px oklch(60% 0.15 300 / 0.6), 0 0 180px oklch(60% 0.15 300 / 0.3); }
+.ball.speaking { animation: ballBreathe 1.8s ease-in-out infinite; }
+@keyframes ballBreathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+}
+.ball-core {
+  position: absolute;
+  inset: 34px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 38% 32%, oklch(98% 0.01 90 / 0.9), oklch(85% 0.12 80 / 0.5) 45%, transparent 75%);
+  filter: blur(1px);
+}
+.ball-ring {
+  position: absolute;
+  border-radius: 50%;
+  border: 1.5px solid oklch(90% 0.06 85 / 0.35);
+  inset: 8px;
+}
+.ball-ring.r2 { inset: -14px; border-style: dashed; opacity: 0.5; animation: spin 14s linear infinite; }
+.ball-ring.r3 { inset: 30px; border-color: oklch(90% 0.06 85 / 0.25); }
+@keyframes spin { to { transform: rotate(360deg); } }
+.ball-glow {
+  position: absolute;
+  inset: -40px;
+  border-radius: 50%;
+  background: radial-gradient(circle, oklch(80% 0.14 78 / 0.25), transparent 70%);
+  pointer-events: none;
+}
+.spark {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: oklch(95% 0.04 90);
+  opacity: 0.8;
+  animation: twinkle 2.4s ease-in-out infinite;
+}
+.spark.s1 { top: 6%; left: 22%; }
+.spark.s2 { top: 18%; right: 10%; animation-delay: 0.7s; }
+.spark.s3 { bottom: 12%; left: 14%; animation-delay: 1.4s; }
+@keyframes twinkle {
+  0%, 100% { opacity: 0.25; transform: scale(0.8); }
+  50% { opacity: 0.95; transform: scale(1.3); }
+}
+
+.ball-status {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--color-accent);
+  min-height: 1.6em;
+  margin-bottom: var(--space-4);
+}
+.ball-transcript {
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: var(--space-5);
+  text-align: left;
+  padding: 4px;
+}
+.bubble {
+  max-width: 85%;
+  padding: 10px 16px;
+  border-radius: var(--radius-md);
+  font-size: 0.95rem;
+  line-height: 1.45;
+  animation: fadeIn 0.3s ease both;
+}
+.bubble.user {
+  align-self: flex-end;
+  background: var(--color-accent);
+  color: oklch(14% 0.015 260);
+  font-weight: 500;
+}
+.bubble.oracle {
+  align-self: flex-start;
+  background: var(--color-paper-3);
+  color: var(--color-ink);
+  border: 1px solid oklch(100% 0 0 / 0.08);
+}
+.ball-controls { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+
 /* ——— motion ——— */
 .fade-in { animation: fadeIn 0.5s ease both; }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }

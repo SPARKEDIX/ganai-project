@@ -2,24 +2,86 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-const C = {
-  GOOD: "good",
-  WARN: "warn",
-  BAD: "bad",
-};
+const C = { GOOD: "good", WARN: "warn", BAD: "bad" };
 
-function clampScore(s) {
-  return Math.max(0, Math.min(100, Math.round(s || 0)));
-}
+function clampScore(s) { return Math.max(0, Math.min(100, Math.round(s || 0))); }
 function verdict(score) {
   if (score >= 65) return { label: "Strong visibility", tone: C.GOOD, mark: "●" };
   if (score >= 35) return { label: "Building presence", tone: C.WARN, mark: "◐" };
   return { label: "Invisible to AI", tone: C.BAD, mark: "○" };
 }
-function toneFor(sentiment) {
-  if (sentiment === "positive") return { label: "Positive", tone: C.GOOD };
-  if (sentiment === "negative") return { label: "Negative", tone: C.BAD };
+function toneFor(s) {
+  if (s === "positive") return { label: "Positive", tone: C.GOOD };
+  if (s === "negative") return { label: "Negative", tone: C.BAD };
   return { label: "Neutral", tone: C.WARN };
+}
+
+/* ——— Voice engine (browser-independent: recording → backend Whisper) ——— */
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result).split(",")[1] || "");
+    fr.onerror = () => reject(new Error("FileReader failed"));
+    fr.readAsDataURL(blob);
+  });
+}
+
+async function recordOnce(maxMs = 8000) {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    const e = new Error("NO_MIC_API");
+    throw e;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    const e = new Error(
+      err.name === "NotAllowedError" || err.name === "PermissionDeniedError"
+        ? "PERMISSION"
+        : err.name === "NotFoundError" || err.name === "DevicesNotFoundError"
+        ? "NO_DEVICE"
+        : "NO_MIC_API"
+    );
+    throw e;
+  }
+  const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+    ? "audio/webm;codecs=opus"
+    : "audio/webm";
+  const rec = new MediaRecorder(stream, { mimeType: mime });
+  const chunks = [];
+  rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+  const stopped = new Promise((res) => { rec.onstop = res; });
+  rec.start();
+  await new Promise((r) => setTimeout(r, maxMs));
+  if (rec.state !== "inactive") rec.stop();
+  await stopped;
+  stream.getTracks().forEach((t) => t.stop());
+  return new Blob(chunks, { type: mime.split(";")[0] });
+}
+
+async function transcribe(blob) {
+  const b64 = await blobToBase64(blob);
+  const res = await fetch("/api/stt", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ audioBase64: b64, mime: blob.type }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "STT failed");
+  return data.text;
+}
+
+function micErrorText(err) {
+  if (err?.message === "PERMISSION") {
+    return "Mic permission deny hai — browser ke address bar (lock icon) se allow karo, phir try karo.";
+  }
+  if (err?.message === "NO_DEVICE") {
+    return "Koi microphone device nahi mila — mic connect karke try karo.";
+  }
+  if (err?.message === "NO_MIC_API") {
+    return "Is browser mein mic recording available nahi hai — Chrome/Edge use karo (HTTPS par).";
+  }
+  return err?.message || "Mic error";
 }
 
 export default function Home() {
@@ -27,24 +89,28 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("");
 
-  const [report, setReport] = useState(null); // { brand, result }
+  const [report, setReport] = useState(null);
   const [competitors, setCompetitors] = useState([]);
   const [compare, setCompare] = useState([]);
   const [comparing, setComparing] = useState(false);
   const [history, setHistory] = useState([]);
-  const [listening, setListening] = useState(false);
 
-  const inputRef = useRef(null);
-  const recRef = useRef(null);
+  // voice (input mic)
+  const [recording, setRecording] = useState(false);
+  const recBusy = useRef(false);
 
-  // ——— history ———
+  // crystal ball
+  const [ballOpen, setBallOpen] = useState(false);
+  const [ballState, setBallState] = useState("idle"); // idle | listening | thinking | speaking
+  const [transcript, setTranscript] = useState([]);
+  const ballBusy = useRef(false);
+  const ballStopRef = useRef(null);
+
   useEffect(() => {
-    try {
-      setHistory(JSON.parse(localStorage.getItem("br_history") || "[]"));
-    } catch {
-      setHistory([]);
-    }
+    try { setHistory(JSON.parse(localStorage.getItem("br_history") || "[]")); } catch { setHistory([]); }
   }, []);
+
+  useEffect(() => () => { try { window.speechSynthesis?.cancel(); } catch {} }, []);
 
   const pushHistory = useCallback((entry) => {
     setHistory((prev) => {
@@ -54,29 +120,26 @@ export default function Home() {
     });
   }, []);
 
-  const analyze = useCallback(
-    async (brands, { silent = false } = {}) => {
-      if (!brands.length) return null;
-      if (!silent) setLoading(true);
-      setStatus("analyzing");
-      try {
-        const res = await fetch("/api/analyze", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ brands }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Something went wrong");
-        return data.results;
-      } catch (e) {
-        setStatus("error:" + e.message);
-        return null;
-      } finally {
-        if (!silent) setLoading(false);
-      }
-    },
-    []
-  );
+  const analyze = useCallback(async (brands, { silent = false } = {}) => {
+    if (!brands.length) return null;
+    if (!silent) setLoading(true);
+    setStatus("analyzing");
+    try {
+      const res = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ brands }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Something went wrong");
+      return data.results;
+    } catch (e) {
+      setStatus("error:" + e.message);
+      return null;
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  }, []);
 
   const runScan = useCallback(async () => {
     const b = brand.trim();
@@ -102,49 +165,104 @@ export default function Home() {
     setCompare(results);
   }, [brand, competitors, analyze]);
 
-  // ——— voice (browser-native speech, no key needed) ———
-  const startListening = useCallback(() => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) {
-      setStatus("error:Ye browser voice support nahi karta — Chrome/Edge use karo.");
-      return;
-    }
-    const rec = new SR();
-    recRef.current = rec;
-    rec.lang = "en-IN";
-    rec.interimResults = false;
-    rec.maxAlternatives = 1;
-    rec.onstart = () => setListening(true);
-    rec.onend = () => setListening(false);
-    rec.onerror = (e) => {
-      setListening(false);
-      if (e.error !== "aborted" && e.error !== "no-speech") {
-        setStatus("error:Voice error: " + e.error);
-      }
-    };
-    rec.onresult = (e) => {
-      const text = e.results[0]?.[0]?.transcript?.trim();
+  /* ——— mic input (main bar) ——— */
+  const runMicInput = useCallback(async () => {
+    if (recBusy.current) return;
+    recBusy.current = true;
+    setRecording(true);
+    setStatus("listening");
+    try {
+      const blob = await recordOnce();
+      setStatus("transcribing");
+      const text = await transcribe(blob);
       if (text) { setBrand(text); setStatus(""); }
-    };
-    rec.start();
+      else setStatus("error:Awaaz samajh nahi aayi.");
+    } catch (e) {
+      setStatus("error:" + micErrorText(e));
+    } finally {
+      setRecording(false);
+      recBusy.current = false;
+    }
   }, []);
 
-  const stopListening = useCallback(() => {
-    try { recRef.current?.stop(); } catch {}
-    setListening(false);
-  }, []);
-
-  const speak = useCallback((text) => {
-    if (!("speechSynthesis" in window)) return;
+  /* ——— Crystal Ball: voice-to-voice ——— */
+  const speak = useCallback((text, onEnd) => {
+    if (!("speechSynthesis" in window)) { onEnd?.(); return; }
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
     u.lang = "en-IN";
     u.rate = 1;
+    u.onend = () => onEnd?.();
+    u.onerror = () => onEnd?.();
     window.speechSynthesis.speak(u);
   }, []);
 
-  useEffect(() => () => { try { window.speechSynthesis?.cancel(); } catch {} }, []);
+  const ballListen = useCallback(async () => {
+    if (ballBusy.current) return;
+    ballBusy.current = true;
+    setBallState("listening");
+    try {
+      const blob = await recordOnce(7000);
+      setBallState("thinking");
+      const userText = await transcribe(blob);
+      if (!userText) {
+        setTranscript((p) => [...p, { who: "oracle", text: "Mujhe aapki awaaz samajh nahi aayi — thoda clear boliye." }]);
+        setBallState("speaking");
+        speak("Mujhe aapki awaaz samajh nahi aayi. Thoda clear boliye.", () => { setBallState("idle"); });
+        return;
+      }
+      setTranscript((p) => [...p, { who: "user", text: userText }]);
 
+      const res = await fetch("/api/converse", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: userText }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Oracle failed");
+      const reply = data.reply;
+
+      setTranscript((p) => [...p, { who: "oracle", text: reply }]);
+      setBallState("speaking");
+      speak(reply, () => {
+        setBallState("idle");
+        // auto re-listen — continuous conversation, jab tak ball band na ho
+        if (ballStopRef.current === "go") ballListen();
+        else ballStopRef.current = null;
+      });
+    } catch (e) {
+      setBallState("idle");
+      setTranscript((p) => [...p, { who: "oracle", text: "⚠ " + micErrorText(e) }]);
+    } finally {
+      ballBusy.current = false;
+    }
+  }, [speak]);
+
+  const openBall = useCallback(() => {
+    setBallOpen(true);
+    setTranscript([]);
+    setBallState("idle");
+    ballStopRef.current = "go";
+    setTimeout(() => { if (ballStopRef.current === "go") ballListen(); }, 600);
+  }, [ballListen]);
+
+  const closeBall = useCallback(() => {
+    ballStopRef.current = "stop";
+    setBallOpen(false);
+    setBallState("idle");
+    try { window.speechSynthesis?.cancel(); } catch {}
+  }, []);
+
+  const toggleBallTalk = useCallback(() => {
+    if (ballState === "speaking") {
+      try { window.speechSynthesis?.cancel(); } catch {}
+      setBallState("idle");
+    } else if (ballState === "idle") {
+      ballListen();
+    }
+  }, [ballState, ballListen]);
+
+  /* ——— compare helpers ——— */
   const addCompetitor = () => {
     const v = brand.trim();
     if (!v) { setStatus("error:Pehle main brand naam likho."); return; }
@@ -169,12 +287,7 @@ export default function Home() {
           <a href="#scan">Scan</a>
           <a href="#compare">Compare</a>
           <a href="#history">History</a>
-          <a
-            className="gh"
-            href="https://github.com/SPARKEDIX/ganai-project"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
+          <a className="gh" href="https://github.com/SPARKEDIX/ganai-project" target="_blank" rel="noopener noreferrer">
             Source ↗
           </a>
         </nav>
@@ -192,6 +305,14 @@ export default function Home() {
             real LLM what it knows. You get a <b>visibility score</b>,{" "}
             <b>sentiment</b>, and <b>fixes</b>. No signup, no chat, no cost.
           </p>
+          <div style={{ marginTop: "28px", display: "flex", gap: "12px", justifyContent: "center", flexWrap: "wrap" }}>
+            <button className="btn" onClick={openBall}>
+              🔮 Voice-to-Voice
+            </button>
+            <button className="btn ghost" onClick={() => speak("Welcome to Brand Radar. Type a brand name and press scan, or tap the microphone to speak it.")}>
+              🔊 Demo intro
+            </button>
+          </div>
         </section>
 
         {/* console */}
@@ -204,7 +325,6 @@ export default function Home() {
           <div className="scan-row">
             <div className="scan-input-wrap">
               <input
-                ref={inputRef}
                 className="scan-input"
                 type="text"
                 value={brand}
@@ -215,12 +335,13 @@ export default function Home() {
                 disabled={loading}
               />
               <button
-                className={"mic-btn" + (listening ? " listening" : "")}
-                onClick={listening ? stopListening : startListening}
-                aria-label={listening ? "Stop listening" : "Speak the brand name"}
-                title="Voice input"
+                className={"mic-btn" + (recording ? " listening" : "")}
+                onClick={runMicInput}
+                disabled={recording}
+                aria-label={recording ? "Recording…" : "Speak the brand name"}
+                title="Voice input (bolo)"
               >
-                {listening ? "■" : "🎙"}
+                {recording ? "■" : "🎙"}
               </button>
             </div>
             <button className="btn" onClick={runScan} disabled={loading || !!report}>
@@ -229,7 +350,7 @@ export default function Home() {
           </div>
 
           <div className={"status-line" + (status.startsWith("error:") ? " error" : "")} aria-live="polite">
-            {status ? status.replace(/^error:/, "⚠ ") : "\u00A0"}
+            {status ? (status === "listening" ? "🎙 Sun raha hoon… bolo" : status === "transcribing" ? "✍️ Awaaz likh raha hoon…" : status === "analyzing" ? "⏳ AI soch raha hai…" : status.replace(/^error:/, "⚠ ")) : "\u00A0"}
           </div>
         </section>
 
@@ -246,9 +367,7 @@ export default function Home() {
                   <circle className="gauge-track" cx="80" cy="80" r="70" />
                   <circle
                     className="gauge-fill"
-                    cx="80"
-                    cy="80"
-                    r="70"
+                    cx="80" cy="80" r="70"
                     style={{
                       strokeDasharray: circ,
                       strokeDashoffset: circ * (1 - report.result.score / 100),
@@ -301,9 +420,7 @@ export default function Home() {
 
         {/* compare */}
         <section className="card" id="compare">
-          <h2>
-            ⚔️ Competitor compare
-          </h2>
+          <h2>⚔️ Competitor compare</h2>
           <p style={{ color: "var(--color-muted)", fontSize: "0.95rem", marginBottom: "12px" }}>
             Same LLM, same questions — apne brand ko competitors ke against measure karo.
           </p>
@@ -358,8 +475,8 @@ export default function Home() {
               className="btn"
               onClick={() => {
                 const el = document.getElementById("comp-input");
-                const v = el.value.trim();
-                if (v) { setCompetitors((prev) => (prev.includes(v) ? prev : [...prev, v])); el.value = ""; }
+                const val = el.value.trim();
+                if (val) { setCompetitors((prev) => (prev.includes(val) ? prev : [...prev, val])); el.value = ""; }
                 runCompare();
               }}
               disabled={comparing || competitors.length === 0}
@@ -380,10 +497,7 @@ export default function Home() {
                       <span><b>{r.ok ? sc : "—"}</b> / 100</span>
                     </div>
                     <div className="cbar-track">
-                      <div
-                        className="cbar-fill"
-                        style={{ width: r.ok ? (sc / max) * 100 + "%" : "0%" }}
-                      />
+                      <div className="cbar-fill" style={{ width: r.ok ? (sc / max) * 100 + "%" : "0%" }} />
                     </div>
                     {!r.ok && <div style={{ fontSize: "0.8rem", color: "var(--color-bad)", marginTop: "4px" }}>⚠ {r.error}</div>}
                   </div>
@@ -399,11 +513,7 @@ export default function Home() {
           {history.length ? (
             <div className="hist">
               {history.map((h) => (
-                <button
-                  key={h.brand}
-                  className="hist-btn"
-                  onClick={() => { setBrand(h.brand); setReport(null); }}
-                >
+                <button key={h.brand} className="hist-btn" onClick={() => { setBrand(h.brand); setReport(null); }}>
                   {h.brand} · {h.score}
                 </button>
               ))}
@@ -414,7 +524,7 @@ export default function Home() {
         </section>
       </main>
 
-      {/* footer — Ft5 statement */}
+      {/* footer */}
       <footer>
         <p className="footer-statement">
           In a world where AI reads the internet, <span className="hl">brands that AI can see are the brands that get chosen</span>.
@@ -432,6 +542,51 @@ export default function Home() {
           </a>
         </p>
       </footer>
+
+      {/* ——— Crystal Ball overlay ——— */}
+      {ballOpen && (
+        <div className="veil" role="dialog" aria-modal="true" aria-label="Crystal ball voice conversation">
+          <div className="ball-stage">
+            <div className={"ball " + ballState}>
+              <div className="ball-core" />
+              <div className="ball-ring r1" />
+              <div className="ball-ring r2" />
+              <div className="ball-ring r3" />
+              <span className="spark s1" />
+              <span className="spark s2" />
+              <span className="spark s3" />
+              <span className="ball-glow" />
+            </div>
+
+            <div className="ball-status">
+              {ballState === "listening" && "🎙 Listening… bolo"}
+              {ballState === "thinking" && "🌀 Oracle soch raha hai…"}
+              {ballState === "speaking" && "🔊 Speaking…"}
+              {ballState === "idle" && "Tap ball to talk"}
+            </div>
+
+            <div className="ball-transcript" aria-live="polite">
+              {transcript.map((t, i) => (
+                <div key={i} className={"bubble " + t.who}>
+                  {t.text}
+                </div>
+              ))}
+              {!transcript.length && (
+                <p className="empty-note">Crystal ball tumhara voice assistant hai — ball dabao aur bolo. Ye apne aap sunta-jawab deta hai.</p>
+              )}
+            </div>
+
+            <div className="ball-controls">
+              <button className="btn" onClick={toggleBallTalk} disabled={ballState === "thinking"}>
+                {ballState === "speaking" ? "⏹ Stop" : "🎙 Talk"}
+              </button>
+              <button className="btn ghost" onClick={closeBall}>
+                ✕ Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
