@@ -38,10 +38,28 @@ export async function POST(req) {
 
   const mime = typeof body.mime === "string" && body.mime ? body.mime : "audio/webm";
 
+  // Groq/OpenAI file type ko extension se validate karta hai — sahi ext lagao
+  const EXT_BY_MIME = {
+    "audio/webm": ".webm",
+    "audio/ogg": ".ogg",
+    "audio/wav": ".wav",
+    "audio/wave": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/mpga": ".mpga",
+    "audio/mp4": ".m4a",
+    "audio/m4a": ".m4a",
+    "audio/flac": ".flac",
+    "audio/opus": ".opus",
+    "audio/x-m4a": ".m4a",
+  };
+  const ext = EXT_BY_MIME[mime] || ".webm";
+
   try {
     const form = new FormData();
     form.append("model", "whisper-large-v3");
-    form.append("file", new Blob([audioBuffer], { type: mime }), "audio");
+    form.append("file", new Blob([audioBuffer], { type: mime }), "audio" + ext);
     form.append("language", "en");
     form.append("temperature", "0");
 
