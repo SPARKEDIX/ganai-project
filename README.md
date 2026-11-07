@@ -2,7 +2,7 @@
 
 **Check karo ki AI assistants tumhare brand ko jaante hain ya nahi — aur kya kehte hain.**
 
-> Hackathon project · Live demo: `https://brandradar.vercel.app` (deployment ke baad)
+> Hackathon project · Live demo: `https://brandradar-pearl.vercel.app`
 
 ## ✨ Kya karta hai
 
